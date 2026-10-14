@@ -25,7 +25,7 @@ export class PgStore implements UserStore {
 
   async getUser(telegramId: number): Promise<UserRecord | null> {
     const { rows } = await this.pool.query(
-      `SELECT u.telegram_id, u.lang, a.tax_form, a.vat, a.zus, a.completed_at
+      `SELECT u.telegram_id, u.lang, a.tax_form, a.vat, a.zus, to_char(a.zus_since, 'YYYY-MM-DD') AS zus_since, a.completed_at
          FROM users u LEFT JOIN onboarding_answers a ON a.user_id = u.id
         WHERE u.telegram_id = $1`,
       [telegramId],
@@ -40,6 +40,7 @@ export class PgStore implements UserStore {
       telegramId: Number(r.telegram_id),
       lang: r.lang,
       answers,
+      zusSince: r.zus_since ?? null,
       completed: r.completed_at !== null && r.completed_at !== undefined,
     };
   }
@@ -48,11 +49,23 @@ export class PgStore implements UserStore {
     assertAnswer(field, value);
     // Имя колонки берётся только из фиксированной таблицы COLUMN, не из ввода пользователя.
     const col = COLUMN[field];
+    // Смена схемы ZUS сбрасывает дату её начала.
+    const resetSince = field === "zus" ? ", zus_since = NULL" : "";
     const res = await this.pool.query(
       `INSERT INTO onboarding_answers (user_id, ${col})
        SELECT id, $2 FROM users WHERE telegram_id = $1
-       ON CONFLICT (user_id) DO UPDATE SET ${col} = EXCLUDED.${col}, updated_at = now()`,
+       ON CONFLICT (user_id) DO UPDATE SET ${col} = EXCLUDED.${col}${resetSince}, updated_at = now()`,
       [telegramId, value],
+    );
+    if (res.rowCount === 0) throw new Error("Пользователь не найден");
+  }
+
+  async saveZusSince(telegramId: number, isoDate: string): Promise<void> {
+    const res = await this.pool.query(
+      `INSERT INTO onboarding_answers (user_id, zus_since)
+       SELECT id, $2::date FROM users WHERE telegram_id = $1
+       ON CONFLICT (user_id) DO UPDATE SET zus_since = EXCLUDED.zus_since, updated_at = now()`,
+      [telegramId, isoDate],
     );
     if (res.rowCount === 0) throw new Error("Пользователь не найден");
   }

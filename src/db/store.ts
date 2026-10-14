@@ -9,6 +9,8 @@ export interface UserRecord {
   telegramId: number;
   lang: Lang;
   answers: Partial<Record<AnswerField, string>>;
+  /** Дата начала льготной схемы ZUS, ISO (YYYY-MM-DD). */
+  zusSince: string | null;
   completed: boolean;
 }
 
@@ -17,6 +19,8 @@ export interface UserStore {
   upsertUser(telegramId: number, lang: Lang): Promise<void>;
   getUser(telegramId: number): Promise<UserRecord | null>;
   saveAnswer(telegramId: number, field: AnswerField, value: string): Promise<void>;
+  /** Сохраняет дату начала льготной схемы ZUS (ISO). Смена ответа zus её сбрасывает. */
+  saveZusSince(telegramId: number, isoDate: string): Promise<void>;
   markCompleted(telegramId: number): Promise<void>;
   /** Удаляет пользователя и все его данные (GDPR, команда /delete). */
   deleteUser(telegramId: number): Promise<void>;
@@ -41,7 +45,7 @@ export class MemoryStore implements UserStore {
   async upsertUser(telegramId: number, lang: Lang): Promise<void> {
     const u = this.users.get(telegramId);
     if (u) u.lang = lang;
-    else this.users.set(telegramId, { telegramId, lang, answers: {}, completed: false });
+    else this.users.set(telegramId, { telegramId, lang, answers: {}, zusSince: null, completed: false });
   }
 
   async getUser(telegramId: number): Promise<UserRecord | null> {
@@ -54,6 +58,13 @@ export class MemoryStore implements UserStore {
     const u = this.users.get(telegramId);
     if (!u) throw new Error("Пользователь не найден");
     u.answers[field] = value;
+    if (field === "zus") u.zusSince = null;
+  }
+
+  async saveZusSince(telegramId: number, isoDate: string): Promise<void> {
+    const u = this.users.get(telegramId);
+    if (!u) throw new Error("Пользователь не найден");
+    u.zusSince = isoDate;
   }
 
   async markCompleted(telegramId: number): Promise<void> {

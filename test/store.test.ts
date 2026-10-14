@@ -17,6 +17,7 @@ async function contract(name: string, make: () => Promise<{ store: UserStore; do
         telegramId: 101,
         lang: "uk",
         answers: { taxForm: "ryczalt", vat: "no", zus: "pelny" },
+        zusSince: null,
         completed: true,
       });
     } finally {
@@ -45,6 +46,20 @@ async function contract(name: string, make: () => Promise<{ store: UserStore; do
       await store.upsertUser(103, "ru");
       await assert.rejects(store.saveAnswer(103, "vat", "maybe"), /Недопустимый/);
       await assert.rejects(store.saveAnswer(999, "vat", "yes"), /не найден/);
+    } finally {
+      await done();
+    }
+  });
+
+  test(`${name}: дата льготы сохраняется и сбрасывается при смене схемы`, async () => {
+    const { store, done } = await make();
+    try {
+      await store.upsertUser(105, "ru");
+      await store.saveAnswer(105, "zus", "ulga_na_start");
+      await store.saveZusSince(105, "2026-03-15");
+      assert.equal((await store.getUser(105))?.zusSince, "2026-03-15");
+      await store.saveAnswer(105, "zus", "pelny");
+      assert.equal((await store.getUser(105))?.zusSince, null);
     } finally {
       await done();
     }
