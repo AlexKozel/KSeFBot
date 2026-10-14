@@ -5,6 +5,9 @@
 import { KsefClient, KsefError } from "../src/ksef/client.ts";
 import { parseFa3 } from "../src/ksef/fa3.ts";
 import { buildTestInvoice } from "../src/ksef/testInvoice.ts";
+import { buildEwidencja, monthRevenue } from "../src/tax/ewidencja.ts";
+import { NbpClient } from "../src/tax/nbp.ts";
+import type { Fa3Invoice } from "../src/ksef/fa3.ts";
 
 const nip = process.env.KSEF_NIP;
 const readToken = process.env.KSEF_TOKEN;
@@ -55,6 +58,7 @@ try {
   note("list", `Обе фактуры найдены в списке продаж`);
 
   // 3. Скачивание и разбор
+  const parsed: { ksefNumber: string; invoice: Fa3Invoice }[] = [];
   for (const s of sent) {
     const h = found.find((x) => x.invoiceNumber === s.number);
     if (!h) fail("match", `Нет фактуры ${s.number} в списке`);
@@ -63,8 +67,19 @@ try {
       fail("parse", `${s.number}: ожидали ${s.expectNet} ${s.currency}, получили ${f.netTotal} ${f.currency}`);
     }
     if (h!.netAmount !== s.expectNet) fail("metadata", `${s.number}: в метаданных ${h!.netAmount}, ожидали ${s.expectNet}`);
+    parsed.push({ ksefNumber: h!.ksefNumber, invoice: f });
     note("parse", `${s.number}: ${f.currency} нетто ${(f.netTotal / 100).toFixed(2)}, услуга до ${f.serviceDate}, покупатель ${f.buyer.vatUe ?? f.buyer.nip}`);
   }
+
+  // 4. Ewidencja по настоящим курсам NBP
+  const entries = await buildEwidencja(parsed, new NbpClient(), 0.12);
+  for (const e of entries) {
+    const rate = e.rate4 === null ? "PLN" : `курс ${(e.rate4 / 10_000).toFixed(4)} от ${e.rateDate} (${e.rateTable})`;
+    note("ewidencja", `${e.lp}. ${e.revenueDate} ${e.documentNumber}: ${(e.amountPln / 100).toFixed(2)} zł, ${rate}`);
+  }
+  const eur = entries.find((e) => e.currency === "EUR");
+  if (!eur || !eur.rateDate || eur.rateDate >= eur.revenueDate) fail("nbp", "Курс EUR не найден или не с предыдущего рабочего дня");
+  note("month", `Доход за ${today.slice(0, 7)}: ${(monthRevenue(entries, today.slice(0, 7)) / 100).toFixed(2)} zł`);
 } catch (e) {
   const err = e as KsefError;
   fail("ksef", `${err.message} ${(err.details ?? []).join(" | ").replace(/\s+/g, " ").slice(0, 400)}`);
