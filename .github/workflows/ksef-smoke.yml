@@ -1,0 +1,63 @@
+name: KSeF smoke test
+
+# Проверка клиента KSeF на тестовой среде МФ (api-test.ksef.mf.gov.pl).
+# 1) Официальная утилита МФ (CertTestApp) входит самоподписанным сертификатом
+#    со случайным тестовым NIP — так можно только в тестовой среде.
+# 2) Выпускаем токен KSeF только с правом InvoiceRead — как сделает бета-пользователь.
+# 3) Наш клиент входит этим токеном и читает фактуры.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1" # раз в неделю: ловим изменения API тестовой среды
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API: https://api-test.ksef.mf.gov.pl/v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Test NIP
+        run: echo "KSEF_NIP=$(node --experimental-strip-types scripts/random-nip.ts)" >> "$GITHUB_ENV"
+
+      - name: XAdES login with self-signed certificate (official MF tool)
+        run: |
+          git clone --depth 1 https://github.com/CIRFMF/ksef-client-csharp.git /tmp/sdk
+          cd /tmp/sdk/KSeF.Client.Tests.CertTestApp
+          dotnet run --framework net8.0 -- --nip "$KSEF_NIP" --no-startup-warnings > /tmp/cert-app.log 2>&1 || true
+          ACCESS=$(grep -oP 'AccessToken:\s*\K\S+' /tmp/cert-app.log || true)
+          if [ -z "$ACCESS" ]; then
+            grep -E "\[!\]|Kod:|Opis:|Exception|error" /tmp/cert-app.log | head -9 | while IFS= read -r l; do echo "::error title=cert-app::$l"; done
+            exit 1
+          fi
+          echo "::add-mask::$ACCESS"
+          echo "ACCESS=$ACCESS" >> "$GITHUB_ENV"
+
+      - name: Issue read-only KSeF token
+        run: |
+          RESP=$(curl -sS -X POST "$API/tokens" -H "Authorization: Bearer $ACCESS" -H "Content-Type: application/json" \
+            -d '{"permissions":["InvoiceRead"],"description":"KSeFBot smoke test (read only)"}')
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          REF=$(echo "$RESP" | jq -r '.referenceNumber // empty')
+          if [ -z "$TOKEN" ]; then echo "::error title=tokens::$(echo "$RESP" | head -c 400)"; exit 1; fi
+          echo "::add-mask::$TOKEN"
+          echo "KSEF_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          # Токен активируется асинхронно.
+          for i in $(seq 1 30); do
+            ST=$(curl -sS "$API/tokens/$REF" -H "Authorization: Bearer $ACCESS" | jq -r '.status // empty')
+            [ "$ST" = "Active" ] && { echo "::notice title=token::Токен InvoiceRead активен"; exit 0; }
+            [ "$ST" = "Failed" ] && { echo "::error title=token::Токен не активировался"; exit 1; }
+            sleep 2
+          done
+          echo "::error title=token::Токен не стал Active за минуту (последний статус: $ST)"; exit 1
+
+      - name: Our client — login with KSeF token and read invoices
+        run: node --experimental-strip-types scripts/ksef-smoke.ts
