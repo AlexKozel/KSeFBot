@@ -25,6 +25,8 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - run: npm install
+
       - name: Test NIP
         run: echo "KSEF_NIP=$(node --experimental-strip-types scripts/random-nip.ts)" >> "$GITHUB_ENV"
 
