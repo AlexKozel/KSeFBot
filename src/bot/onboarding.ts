@@ -1,23 +1,9 @@
 // Онбординг для листа ожидания: язык → форма налога → VAT → схема ZUS.
-// Пока ответы хранятся в памяти; в следующем шаге — PostgreSQL (User, Business).
+// Ответы сохраняются в UserStore (PostgreSQL на сервере, память в разработке).
 
-import { Bot, InlineKeyboard, type Context } from "grammy";
+import { InlineKeyboard, type Bot, type Context } from "grammy";
 import { texts, type Lang } from "../i18n/index.ts";
-
-export interface WaitlistAnswers {
-  lang: Lang;
-  taxForm?: string;
-  vat?: string;
-  zus?: string;
-}
-
-export const waitlist = new Map<number, WaitlistAnswers>();
-
-function t(ctx: Context) {
-  const id = ctx.from?.id;
-  const lang = (id && waitlist.get(id)?.lang) || "ru";
-  return texts[lang];
-}
+import type { AnswerField, UserStore } from "../db/store.ts";
 
 function keyboard(prefix: string, options: Record<string, string>): InlineKeyboard {
   const kb = new InlineKeyboard();
@@ -25,48 +11,61 @@ function keyboard(prefix: string, options: Record<string, string>): InlineKeyboa
   return kb;
 }
 
-export function registerOnboarding(bot: Bot): void {
+async function langOf(store: UserStore, ctx: Context): Promise<Lang> {
+  const id = ctx.from?.id;
+  return (id && (await store.getUser(id))?.lang) || "ru";
+}
+
+export function registerOnboarding(bot: Bot, store: UserStore): void {
   bot.command("start", (ctx) =>
     ctx.reply(texts.ru.chooseLang, {
       reply_markup: new InlineKeyboard().text("Русский", "lang:ru").text("Українська", "lang:uk"),
     }),
   );
 
+  bot.command("delete", async (ctx) => {
+    if (!ctx.from) return;
+    const tx = texts[await langOf(store, ctx)];
+    await store.deleteUser(ctx.from.id);
+    await ctx.reply(tx.deleted);
+  });
+
   bot.callbackQuery(/^lang:(ru|uk)$/, async (ctx) => {
     const lang = ctx.match[1] as Lang;
-    waitlist.set(ctx.from.id, { lang });
+    await store.upsertUser(ctx.from.id, lang);
     const tx = texts[lang];
     await ctx.answerCallbackQuery();
     await ctx.reply(tx.welcome);
     await ctx.reply(tx.askTaxForm, { reply_markup: keyboard("tax", tx.taxForms) });
   });
 
-  bot.callbackQuery(/^tax:(\w+)$/, async (ctx) => {
-    const a = waitlist.get(ctx.from.id);
-    if (!a) return ctx.answerCallbackQuery();
-    a.taxForm = ctx.match[1];
-    const tx = t(ctx);
-    await ctx.answerCallbackQuery();
-    await ctx.reply(tx.askVat, {
-      reply_markup: keyboard("vat", { yes: tx.yes, no: tx.no, unknown: tx.dontKnow }),
+  // Шаг онбординга: сохраняет ответ и задаёт следующий вопрос (или завершает).
+  const step = (
+    prefix: string,
+    field: AnswerField,
+    next: (tx: (typeof texts)[Lang]) => { text: string; kb?: InlineKeyboard } | null,
+  ) => {
+    bot.callbackQuery(new RegExp(`^${prefix}:(\\w+)$`), async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const user = await store.getUser(ctx.from.id);
+      if (!user) return ctx.reply(texts.ru.chooseLang); // начал не с /start
+      try {
+        await store.saveAnswer(ctx.from.id, field, ctx.match[1]!);
+      } catch {
+        return; // устаревшая или подделанная кнопка
+      }
+      const tx = texts[user.lang];
+      const n = next(tx);
+      if (n) return ctx.reply(n.text, n.kb ? { reply_markup: n.kb } : {});
+      await store.markCompleted(ctx.from.id);
+      await ctx.reply(tx.done);
     });
-  });
+  };
 
-  bot.callbackQuery(/^vat:(\w+)$/, async (ctx) => {
-    const a = waitlist.get(ctx.from.id);
-    if (!a) return ctx.answerCallbackQuery();
-    a.vat = ctx.match[1];
-    const tx = t(ctx);
-    await ctx.answerCallbackQuery();
-    await ctx.reply(tx.askZus, { reply_markup: keyboard("zus", tx.zusSchemes) });
-  });
-
-  bot.callbackQuery(/^zus:(\w+)$/, async (ctx) => {
-    const a = waitlist.get(ctx.from.id);
-    if (!a) return ctx.answerCallbackQuery();
-    a.zus = ctx.match[1];
-    await ctx.answerCallbackQuery();
-    await ctx.reply(t(ctx).done);
-    console.log("waitlist", ctx.from.id, JSON.stringify(a));
-  });
+  step("tax", "taxForm", (tx) => ({
+    text: tx.askVat,
+    kb: keyboard("vat", { yes: tx.yes, no: tx.no, unknown: tx.dontKnow }),
+  }));
+  step("vat", "vat", (tx) => ({ text: tx.askZus, kb: keyboard("zus", tx.zusSchemes) }));
+  step("zus", "zus", () => null);
 }

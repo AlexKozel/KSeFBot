@@ -3,6 +3,8 @@ import { z } from "zod";
 const schema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(20, "TELEGRAM_BOT_TOKEN не задан"),
   KSEF_ENV: z.enum(["test", "prod"]).default("test"),
+  /** Если не задан — данные хранятся в памяти (только для разработки). */
+  DATABASE_URL: z.string().url().optional(),
 });
 
 export type Config = z.infer<typeof schema>;
