@@ -14,7 +14,13 @@
   команда `/delete` удаляет все данные пользователя.
 - `src/db/` и `migrations/` — PostgreSQL: пользователи и ответы онбординга. Миграции применяются
   при старте бота или командой `npm run migrate`. Без `DATABASE_URL` данные хранятся в памяти.
-- `src/ksef/` — интерфейс клиента KSeF 2.0 (реализация — следующий шаг).
+- `src/ksef/` — клиент KSeF 2.0: вход по токену KSeF, список фактур продаж, загрузка XML,
+  отправка фактур (сессия); разбор FA(3). Проверяется на тестовой среде МФ workflow «KSeF smoke test».
+- `src/tax/ewidencja.ts`, `src/tax/nbp.ts` — ewidencja przychodów: дата дохода, курс NBP с
+  предыдущего рабочего дня, нумерация по годам, CSV.
+- `src/tax/zusPeriods.ts` — сроки ulga na start и preferencyjny ZUS.
+- `schemas/fa3/` — официальная XSD FA(3); тесты проверяют по ней генерируемые фактуры.
+- `docs/instrukcja-token.md` — черновик инструкции «как создать токен только на чтение» (ru/uk).
 
 ## Запуск
 
