@@ -1,0 +1,54 @@
+name: Try bot (30 min)
+
+# Временный запуск бота для ручной проверки в Telegram. Не хостинг:
+# бот работает до 30 минут, данные в одноразовой базе и пропадают после остановки.
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Сколько минут держать бота (1–30)"
+        default: "30"
+
+concurrency:
+  group: try-bot
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ksefbot
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/ksefbot
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    steps:
+      - name: Check token secret
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error title=no token::Секрет TELEGRAM_BOT_TOKEN не задан в Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run bot
+        run: |
+          M="${{ inputs.minutes }}"
+          case "$M" in ''|*[!0-9]*) M=30;; esac
+          [ "$M" -gt 30 ] && M=30
+          timeout "$((M * 60))s" npm start || [ $? -eq 124 ]
+      - name: Summary
+        if: always()
+        run: |
+          psql "$DATABASE_URL" -At -c "select count(*) from users" > users.txt 2>/dev/null || echo 0 > users.txt
+          echo "::notice title=bot finished::Пользователей за сессию: $(cat users.txt)"
