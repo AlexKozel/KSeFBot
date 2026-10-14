@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: xmllint for XSD tests
+        run: command -v xmllint || (sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils)
       - run: npm install
       - run: npm run typecheck
       - name: Tests

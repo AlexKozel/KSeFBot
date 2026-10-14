@@ -14,9 +14,10 @@
     "migrate": "node --experimental-strip-types src/db/migrate-cli.ts"
   },
   "dependencies": {
+    "fast-xml-parser": "^5.2.5",
     "grammy": "^1.30.0",
-    "zod": "^3.23.8",
-    "pg": "^8.13.0"
+    "pg": "^8.13.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",

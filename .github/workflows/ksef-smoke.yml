@@ -41,23 +41,24 @@ jobs:
           echo "::add-mask::$ACCESS"
           echo "ACCESS=$ACCESS" >> "$GITHUB_ENV"
 
-      - name: Issue read-only KSeF token
+      - name: Issue KSeF tokens (read-only for the user flow, write-only for test data)
         run: |
-          RESP=$(curl -sS -X POST "$API/tokens" -H "Authorization: Bearer $ACCESS" -H "Content-Type: application/json" \
-            -d '{"permissions":["InvoiceRead"],"description":"KSeFBot smoke test (read only)"}')
-          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
-          REF=$(echo "$RESP" | jq -r '.referenceNumber // empty')
-          if [ -z "$TOKEN" ]; then echo "::error title=tokens::$(echo "$RESP" | head -c 400)"; exit 1; fi
-          echo "::add-mask::$TOKEN"
-          echo "KSEF_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-          # Токен активируется асинхронно.
-          for i in $(seq 1 30); do
-            ST=$(curl -sS "$API/tokens/$REF" -H "Authorization: Bearer $ACCESS" | jq -r '.status // empty')
-            [ "$ST" = "Active" ] && { echo "::notice title=token::Токен InvoiceRead активен"; exit 0; }
-            [ "$ST" = "Failed" ] && { echo "::error title=token::Токен не активировался"; exit 1; }
-            sleep 2
-          done
-          echo "::error title=token::Токен не стал Active за минуту (последний статус: $ST)"; exit 1
+          issue() { # $1 = имя переменной, $2 = права JSON, $3 = описание
+            RESP=$(curl -sS -X POST "$API/tokens" -H "Authorization: Bearer $ACCESS" -H "Content-Type: application/json" \
+              -d "{\"permissions\":$2,\"description\":\"$3\"}")
+            TOKEN=$(echo "$RESP" | jq -r '.token // empty'); REF=$(echo "$RESP" | jq -r '.referenceNumber // empty')
+            if [ -z "$TOKEN" ]; then echo "::error title=tokens::$(echo "$RESP" | head -c 400)"; exit 1; fi
+            echo "::add-mask::$TOKEN"; echo "$1=$TOKEN" >> "$GITHUB_ENV"
+            for i in $(seq 1 30); do # токен активируется асинхронно
+              ST=$(curl -sS "$API/tokens/$REF" -H "Authorization: Bearer $ACCESS" | jq -r '.status // empty')
+              [ "$ST" = "Active" ] && { echo "::notice title=token::$3: активен"; return 0; }
+              [ "$ST" = "Failed" ] && { echo "::error title=token::$3: не активировался"; exit 1; }
+              sleep 2
+            done
+            echo "::error title=token::$3: не стал Active (статус $ST)"; exit 1
+          }
+          issue KSEF_TOKEN '["InvoiceRead"]' "KSeFBot smoke read only"
+          issue KSEF_SEED_TOKEN '["InvoiceWrite"]' "KSeFBot smoke seed invoices"
 
       - name: Our client — login with KSeF token and read invoices
         run: node --experimental-strip-types scripts/ksef-smoke.ts

@@ -8,7 +8,15 @@
 //   5. POST /auth/token/redeem                  → accessToken + refreshToken
 // Чтение: POST /invoices/query/metadata (Subject1 = мы продавец), GET /invoices/ksef/{n}.
 
-import { X509Certificate, constants, publicEncrypt, type KeyObject } from "node:crypto";
+import {
+  X509Certificate,
+  constants,
+  createCipheriv,
+  createHash,
+  publicEncrypt,
+  randomBytes,
+  type KeyObject,
+} from "node:crypto";
 
 export type KsefEnv = "test" | "demo" | "prod";
 
@@ -125,17 +133,21 @@ export class KsefClient {
   // ---------- Вход ----------
 
   async getTokenEncryptionKey(): Promise<KeyObject> {
+    return this.getPublicKey("KsefTokenEncryption");
+  }
+
+  private async getPublicKey(usage: "KsefTokenEncryption" | "SymmetricKeyEncryption"): Promise<KeyObject> {
     const certs = await this.json<
       { certificate: string; usage: string[]; validFrom: string; validTo: string }[]
     >("GET", "/security/public-key-certificates");
     const now = this.now().getTime();
     const cert = certs.find(
       (c) =>
-        c.usage.includes("KsefTokenEncryption") &&
+        c.usage.includes(usage) &&
         Date.parse(c.validFrom) <= now &&
         now <= Date.parse(c.validTo),
     );
-    if (!cert) throw new KsefError("Нет действующего ключа KSeF для шифрования токена");
+    if (!cert) throw new KsefError(`Нет действующего ключа KSeF (${usage})`);
     return new X509Certificate(Buffer.from(cert.certificate, "base64")).publicKey;
   }
 
@@ -239,7 +251,82 @@ export class KsefClient {
     });
     return res.text();
   }
+
+  /**
+   * Отправка фактур FA(3) в интерактивной сессии (sesja-interaktywna.md).
+   * Нужен токен с правом InvoiceWrite. Возвращает номера KSeF в порядке отправки.
+   */
+  async sendInvoices(xmls: string[]): Promise<SentInvoice[]> {
+    const rsa = await this.getPublicKey("SymmetricKeyEncryption");
+    const key = randomBytes(32);
+    const iv = randomBytes(16);
+    const encryptedKey = publicEncrypt(
+      { key: rsa, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+      key,
+    ).toString("base64");
+
+    const session = await this.json<{ referenceNumber: string }>("POST", "/sessions/online", {
+      bearer: await this.accessToken(),
+      json: {
+        formCode: { systemCode: "FA (3)", schemaVersion: "1-0E", value: "FA" },
+        encryption: { encryptedSymmetricKey: encryptedKey, initializationVector: iv.toString("base64") },
+      },
+    });
+    const sref = encodeURIComponent(session.referenceNumber);
+
+    const results: SentInvoice[] = [];
+    try {
+      for (const xml of xmls) {
+        const plain = Buffer.from(xml, "utf8");
+        const cipher = createCipheriv("aes-256-cbc", key, iv); // дополнение PKCS#7 — по умолчанию
+        const enc = Buffer.concat([cipher.update(plain), cipher.final()]);
+        const sent = await this.json<{ referenceNumber: string }>("POST", `/sessions/online/${sref}/invoices`, {
+          bearer: await this.accessToken(),
+          json: {
+            invoiceHash: sha256b64(plain),
+            invoiceSize: plain.length,
+            encryptedInvoiceHash: sha256b64(enc),
+            encryptedInvoiceSize: enc.length,
+            encryptedInvoiceContent: enc.toString("base64"),
+          },
+        });
+        results.push({
+          referenceNumber: sent.referenceNumber,
+          ksefNumber: await this.waitForKsefNumber(sref, sent.referenceNumber),
+        });
+      }
+    } finally {
+      // Сессию закрываем всегда; ошибка закрытия не должна скрыть основную ошибку.
+      await this.request("POST", `/sessions/online/${sref}/close`, { bearer: await this.accessToken() }).catch(() => {});
+    }
+    return results;
+  }
+
+  /** 100 — принята, 150 — обрабатывается, 200 — готово, ≥ 400 — отклонена. */
+  private async waitForKsefNumber(sessionRef: string, invoiceRef: string): Promise<string> {
+    for (let i = 0; ; i++) {
+      const st = await this.json<{
+        ksefNumber?: string;
+        status: { code: number; description: string; details?: string[] };
+      }>("GET", `/sessions/${sessionRef}/invoices/${encodeURIComponent(invoiceRef)}`, {
+        bearer: await this.accessToken(),
+      });
+      if (st.status.code === 200 && st.ksefNumber) return st.ksefNumber;
+      if (st.status.code >= 400) {
+        throw new KsefError(`Фактура отклонена: ${st.status.description}`, st.status.code, st.status.details ?? []);
+      }
+      if (i + 1 >= this.pollAttempts) throw new KsefError("Фактура: истекло время ожидания номера KSeF");
+      await this.sleep(1000);
+    }
+  }
 }
+
+export interface SentInvoice {
+  referenceNumber: string;
+  ksefNumber: string;
+}
+
+const sha256b64 = (b: Buffer) => createHash("sha256").update(b).digest("base64");
 
 interface MetadataResponse {
   hasMore: boolean;

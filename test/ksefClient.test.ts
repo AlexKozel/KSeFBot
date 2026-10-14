@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { constants, createPrivateKey, privateDecrypt } from "node:crypto";
+import { constants, createDecipheriv, createHash, createPrivateKey, privateDecrypt } from "node:crypto";
 import { KsefClient, KsefError } from "../src/ksef/client.ts";
 
 // Самоподписанный сертификат вместо настоящего ключа KSeF.
@@ -63,7 +63,7 @@ function authRoutes(statusSequence: Handler[]): Record<string, Handler | Handler
   return {
     "GET /security/public-key-certificates": () => ({
       json: [
-        { certificate: "ignored", usage: ["SymmetricKeyEncryption"], validFrom: "2025-01-01T00:00:00Z", validTo: "2030-01-01T00:00:00Z" },
+        { certificate: CERT_B64, usage: ["SymmetricKeyEncryption"], validFrom: "2025-01-01T00:00:00Z", validTo: "2030-01-01T00:00:00Z" },
         { certificate: CERT_B64, usage: ["KsefTokenEncryption"], validFrom: "2025-01-01T00:00:00Z", validTo: "2030-01-01T00:00:00Z" },
       ],
     }),
@@ -195,4 +195,69 @@ test("accessToken обновляется через refreshToken перед ис
 test("без входа чтение запрещено", async () => {
   const client = new KsefClient({ env: "test", fetch: (async () => new Response("{}")) as typeof fetch });
   await assert.rejects(client.downloadInvoiceXml("X"), /Сначала нужно войти/);
+});
+
+function sendRoutes(statuses: Handler[], received: string[]): Record<string, Handler | Handler[]> {
+  let key: Buffer;
+  let iv: Buffer;
+  const S = "s".repeat(36);
+  return {
+    ...authRoutes([ok]),
+    "POST /sessions/online": (c) => {
+      assert.deepEqual(c.body.formCode, { systemCode: "FA (3)", schemaVersion: "1-0E", value: "FA" });
+      key = privateDecrypt(
+        { key: PRIVATE_KEY, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+        Buffer.from(c.body.encryption.encryptedSymmetricKey, "base64"),
+      );
+      iv = Buffer.from(c.body.encryption.initializationVector, "base64");
+      assert.equal(key.length, 32);
+      assert.equal(iv.length, 16);
+      return { status: 201, json: { referenceNumber: S, validUntil: inHour } };
+    },
+    [`POST /sessions/online/${S}/invoices`]: (c) => {
+      const enc = Buffer.from(c.body.encryptedInvoiceContent, "base64");
+      const d = createDecipheriv("aes-256-cbc", key, iv);
+      const plain = Buffer.concat([d.update(enc), d.final()]);
+      assert.equal(c.body.invoiceHash, createHash("sha256").update(plain).digest("base64"));
+      assert.equal(c.body.invoiceSize, plain.length);
+      assert.equal(c.body.encryptedInvoiceHash, createHash("sha256").update(enc).digest("base64"));
+      received.push(plain.toString("utf8"));
+      return { status: 202, json: { referenceNumber: "i".repeat(36) } };
+    },
+    [`GET /sessions/${S}/invoices/${"i".repeat(36)}`]: statuses,
+    [`POST /sessions/online/${S}/close`]: () => ({ status: 204, text: "" }),
+  };
+}
+
+test("отправка фактуры: шифрование AES, ожидание номера KSeF, закрытие сессии", async () => {
+  const received: string[] = [];
+  const { fetchFn, calls } = fakeKsef(
+    sendRoutes(
+      [
+        () => ({ json: { status: { code: 100, description: "Przyjęta" } } }),
+        () => ({ json: { status: { code: 150, description: "Trwa przetwarzanie" } } }),
+        () => ({ json: { ksefNumber: "5265877635-20261014-ABCDEF123456-01", status: { code: 200, description: "Sukces" } } }),
+      ],
+      received,
+    ),
+  );
+  const client = new KsefClient({ env: "test", fetch: fetchFn, sleep: async () => {}, now: () => NOW });
+  await client.authenticateWithToken("5265877635", "SECRET-TOKEN");
+  const res = await client.sendInvoices(["<Faktura>zażółć</Faktura>"]);
+  assert.deepEqual(res.map((r) => r.ksefNumber), ["5265877635-20261014-ABCDEF123456-01"]);
+  assert.deepEqual(received, ["<Faktura>zażółć</Faktura>"]);
+  assert.ok(calls.some((c) => c.path.endsWith("/close")));
+});
+
+test("отклонённая фактура: ошибка с деталями, сессия всё равно закрывается", async () => {
+  const { fetchFn, calls } = fakeKsef(
+    sendRoutes(
+      [() => ({ json: { status: { code: 450, description: "Błąd weryfikacji semantyki", details: ["P_15 niezgodne"] } } })],
+      [],
+    ),
+  );
+  const client = new KsefClient({ env: "test", fetch: fetchFn, sleep: async () => {}, now: () => NOW });
+  await client.authenticateWithToken("5265877635", "SECRET-TOKEN");
+  await assert.rejects(client.sendInvoices(["<Faktura/>"]), /отклонена/);
+  assert.ok(calls.some((c) => c.path.endsWith("/close")));
 });
