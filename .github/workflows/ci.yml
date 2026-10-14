@@ -26,4 +26,13 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm run typecheck
-      - run: npm test
+      - name: Tests
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt || {
+            # Логи CI недоступны из рабочей среды Claude, поэтому выводим падения в аннотации.
+            grep -E "^\s*not ok|error:|Error:|expected|actual" test-output.txt | head -9 | while IFS= read -r line; do
+              echo "::error title=test::$line"
+            done
+            exit 1
+          }

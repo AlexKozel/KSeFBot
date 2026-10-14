@@ -9,7 +9,11 @@ const COLUMN: Record<AnswerField, string> = {
 };
 
 export class PgStore implements UserStore {
-  constructor(private pool: pg.Pool) {}
+  private pool: pg.Pool;
+
+  constructor(pool: pg.Pool) {
+    this.pool = pool;
+  }
 
   async upsertUser(telegramId: number, lang: Lang): Promise<void> {
     await this.pool.query(
